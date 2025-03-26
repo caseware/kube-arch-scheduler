@@ -114,6 +114,7 @@ func GetPodArchitectures(pod *v1.Pod) ([]ImageArch, error) {
 	containers := []ImageArch{}
 	for _, container := range pod.Spec.Containers {
 		val, err := FetchFromCache(cacheStore, container.Image)
+
 		// If the key exists
 		architectures := make([]string, 0)
 		if err == nil {
@@ -127,29 +128,58 @@ func GetPodArchitectures(pod *v1.Pod) ([]ImageArch, error) {
 				return containers, err
 			}
 
-			index, err := remote.Index(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain),
+			// Prepare auth options
+			remoteOpts := []remote.Option{
+				remote.WithAuthFromKeychain(authn.DefaultKeychain),
 				remote.WithTransport(&http.Transport{
 					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-				}))
+				}),
+			}
 
+			// Special handling for ECR images
 			if strings.Contains(container.Image, "amazonaws.com") {
 				ecrHelper := ecrlogin.NewECRHelper(ecrlogin.WithClientFactory(api.DefaultClientFactory{}))
-				index, err = remote.Index(ref, remote.WithAuthFromKeychain(authn.NewKeychainFromHelper(ecrHelper)),
+				remoteOpts = []remote.Option{
+					remote.WithAuthFromKeychain(authn.NewKeychainFromHelper(ecrHelper)),
 					remote.WithTransport(&http.Transport{
 						TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-					}))
+					}),
+				}
 			}
 
-			if err != nil {
-				return containers, err
+			// First try to get it as an index (multi-arch image)
+			index, indexErr := remote.Index(ref, remoteOpts...)
+			if indexErr == nil {
+				// Successfully got as index, process as multi-arch
+				imageIndex, err := index.IndexManifest()
+				if err != nil {
+					return containers, err
+				}
+				for _, manifest := range imageIndex.Manifests {
+					architectures = append(architectures, manifest.Platform.Architecture)
+				}
+			} else {
+				// Failed as index, try as single image
+				img, imgErr := remote.Image(ref, remoteOpts...)
+				if imgErr != nil {
+					klog.V(2).ErrorS(imgErr, "failed to get image after index attempt failed")
+					// If both attempts failed, return the index error (original error)
+					return containers, indexErr
+				}
+
+				// Successfully got as single image
+				config, err := img.ConfigFile()
+				if err != nil {
+					return containers, err
+				}
+
+				// Extract architecture from config
+				if config != nil && config.Architecture != "" {
+					architectures = append(architectures, config.Architecture)
+					klog.V(2).Info("Found architecture for image: ", container.Image, " ", config.Architecture)
+				}
 			}
-			imageIndex, err := index.IndexManifest()
-			if err != nil {
-				return containers, err
-			}
-			for _, manifest := range imageIndex.Manifests {
-				architectures = append(architectures, manifest.Platform.Architecture)
-			}
+
 			klog.V(2).Info("Added to cache: ", container.Image, " ", architectures)
 			containers = append(containers, ImageArch{Image: container.Image, Architectures: architectures})
 			AddToCache(cacheStore, ImageArch{Image: container.Image, Architectures: architectures})
@@ -161,7 +191,8 @@ func GetPodArchitectures(pod *v1.Pod) ([]ImageArch, error) {
 
 func (s *ArchFilter) Filter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, node *framework.NodeInfo) *framework.Status {
 	nodeArch := node.Node().Status.NodeInfo.Architecture
-	klog.V(2).Infof("filter pod: %v, %v", pod.Name, nodeArch)
+	nodeName := node.Node().Name
+	klog.V(2).Infof("filter pod: %v, For node: %v, Architecture: %v", pod.Name, nodeName, nodeArch)
 	podArchitectures, err := GetPodArchitectures(pod)
 	if err != nil {
 		klog.V(2).ErrorS(err, "failed to get image architectures")
