@@ -115,12 +115,6 @@ func GetPodArchitectures(pod *v1.Pod) ([]ImageArch, error) {
 	for _, container := range pod.Spec.Containers {
 		val, err := FetchFromCache(cacheStore, container.Image)
 
-		// Skip Istio proxy containers
-		if strings.Contains(container.Name, "istio-proxy") {
-			klog.V(2).Info("Skipping Istio proxy container: ", container.Name)
-			continue
-		}
-
 		// If the key exists
 		architectures := make([]string, 0)
 		if err == nil {
