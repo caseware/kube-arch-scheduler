@@ -23,6 +23,7 @@
 *.so
 *.dylib
 bin/*
+kube-arch-scheduler
 
 # Test binary, build with `go test -c`
 *.test
